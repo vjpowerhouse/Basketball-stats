@@ -9,7 +9,6 @@ st.set_page_config(page_title="Team Game Stats", page_icon="🏀", layout="wide"
 
 # ---------- Config / Constants ----------
 
-# Loggable events — we’ll compute attempts/makes from these
 EVENT_TYPES = [
     "2PT_MADE","2PT_MISS","3PT_MADE","3PT_MISS","FT_MADE","FT_MISS",
     "OREB","DREB","AST","STL","BLK","TOV","PF","FD"
@@ -17,7 +16,7 @@ EVENT_TYPES = [
 
 DEFAULT_QUARTERS = ["Q1","Q2","Q3","Q4","OT"]
 
-# Columns for the landscape grid (left-to-right)
+# Landscape columns (left-to-right)
 LANDSCAPE_BUTTON_COLS = [
     ("+2", "2PT_MADE"),
     ("2 Miss", "2PT_MISS"),
@@ -34,16 +33,18 @@ LANDSCAPE_BUTTON_COLS = [
     ("PF", "PF"),
     ("FD", "FD"),
 ]
+HEADER_REPEAT_EVERY = 8  # repeat column header row after this many players
 
 # ---------- State ----------
 
 def init_state():
     if "roster" not in st.session_state:
-        # Both jersey and name are optional per your request
+        # jersey # and name are both optional
         st.session_state.roster = pd.DataFrame(columns=["#", "Player"])
     if "events" not in st.session_state:
         st.session_state.events = pd.DataFrame(columns=[
-            "game_id","datetime","quarter","clock","player_display","player_name","#","event","notes"
+            "game_id","datetime","quarter","clock",
+            "player_display","player_name","#","number","event","notes"
         ])
     if "game_meta" not in st.session_state:
         st.session_state.game_meta = {
@@ -56,7 +57,7 @@ def init_state():
     if "layout_mode" not in st.session_state:
         st.session_state.layout_mode = "Portrait"  # Portrait | Landscape
     if "last_undone" not in st.session_state:
-        st.session_state.last_undone = None  # store the last removed event for feedback
+        st.session_state.last_undone = None
 
 init_state()
 
@@ -68,8 +69,8 @@ def make_game_id(opponent: str, date_str: str) -> str:
     return f"{safe_date}_{safe_opp}"
 
 def player_display_from_row(row: pd.Series) -> str:
-    num = str(row.get("#","") or "").strip()
-    name = str(row.get("Player","") or "").strip()
+    num = str(row.get("#") or "").strip()
+    name = str(row.get("Player") or "").strip()
     if num and name:
         return f"#{num} {name}"
     elif name:
@@ -77,7 +78,19 @@ def player_display_from_row(row: pd.Series) -> str:
     elif num:
         return f"#{num}"
     else:
-        return "(unnamed)"
+        return ""   # completely blank if both empty
+
+def pretty_name(rec: pd.Series) -> str:
+    num = str(rec.get("#") or "").strip()
+    name = str(rec.get("player_name") or "").strip()
+    if num and name:
+        return f"#{num} {name}"
+    elif name:
+        return name
+    elif num:
+        return f"#{num}"
+    else:
+        return ""   # blank
 
 def add_event(game_id: str, quarter: str, clock: str,
               player_display: str, player_name: str, number: str,
@@ -89,8 +102,8 @@ def add_event(game_id: str, quarter: str, clock: str,
         "clock": clock,
         "player_display": player_display,
         "player_name": player_name,
-        "number": number,  # store under 'number' too for DB clarity
         "#": number,
+        "number": number,
         "event": event,
         "notes": notes
     }
@@ -101,10 +114,27 @@ def undo_last_event():
         st.info("No events to undo.")
         st.session_state.last_undone = None
         return
-    # The last row in the DataFrame is the most recently appended event
     last_row = st.session_state.events.iloc[[-1]].to_dict(orient="records")[0]
     st.session_state.events = st.session_state.events.iloc[:-1].reset_index(drop=True)
     st.session_state.last_undone = last_row
+
+def get_event_count(display: str, ev_code: str) -> int:
+    if st.session_state.events.empty:
+        return 0
+    m = st.session_state.events
+    return int(((m["player_display"] == display) & (m["event"] == ev_code)).sum())
+
+def remove_last_for(display: str, ev_code: str) -> bool:
+    """Remove the most recent event row for this player & event code."""
+    if st.session_state.events.empty:
+        return False
+    df = st.session_state.events
+    idxs = df.index[(df["player_display"] == display) & (df["event"] == ev_code)].tolist()
+    if not idxs:
+        return False
+    last_idx = idxs[-1]
+    st.session_state.events = df.drop(index=last_idx).reset_index(drop=True)
+    return True
 
 def compute_box(events: pd.DataFrame) -> pd.DataFrame:
     if events.empty:
@@ -114,8 +144,6 @@ def compute_box(events: pd.DataFrame) -> pd.DataFrame:
         ])
 
     ev = events.copy()
-
-    # Group by the display label so it works even if only # or only name exists
     grp = ev.groupby(["#", "player_name", "player_display"], dropna=False)
 
     def pct(made, att):
@@ -144,23 +172,9 @@ def compute_box(events: pd.DataFrame) -> pd.DataFrame:
     box["FG%"] = pct(box["FGM"], box["FGA"])
     box["3P%"] = pct(box["3PM"], box["3PA"])
     box["FT%"] = pct(box["FTM"], box["FTA"])
-    box["MIN"] = np.nan  # placeholder until we add subs tracker
-
-    # Choose a nice display name
-    def pretty_name(r):
-        num = str(r["#"] or "").strip()
-        name = str(r["player_name"] or "").strip()
-        if num and name:
-            return f"#{num} {name}"
-        elif name:
-            return name
-        elif num:
-            return f"#{num}"
-        else:
-            return "(unnamed)"
+    box["MIN"] = np.nan
 
     box["Player"] = box.apply(pretty_name, axis=1)
-
     cols = ["Player","MIN","PTS","FGM","FGA","FG%","3PM","3PA","3P%","FTM","FTA","FT%",
             "OREB","DREB","REB","AST","STL","BLK","TOV","PF"]
     box = box[cols].sort_values(["PTS","REB","AST"], ascending=[False, False, False]).reset_index(drop=True)
@@ -189,19 +203,20 @@ def save_to_sqlite(db_path: str, roster: pd.DataFrame, events: pd.DataFrame, gam
         event TEXT,
         notes TEXT
     )""")
-    # Upsert roster (simple replace)
+    # Replace players table contents with current roster snapshot
     conn.execute("DELETE FROM players")
     to_store = roster.rename(columns={"#":"number","Player":"name"})[["number","name"]].copy()
     to_store.to_sql("players", conn, if_exists="append", index=False)
-    # Upsert game
+    # Upsert game meta
     conn.execute("INSERT OR REPLACE INTO games (game_id, opponent, date) VALUES (?, ?, ?)",
                  (game_meta["game_id"], game_meta["opponent"], game_meta["date"]))
     # Append events
-    events.to_sql("events", conn, if_exists="append", index=False)
+    events_out = events.drop(columns=["#"], errors="ignore").copy()
+    events_out.to_sql("events", conn, if_exists="append", index=False)
     conn.commit()
     conn.close()
 
-# ---------- UI: Sidebar (Game Settings & Layout) ----------
+# ---------- Sidebar: Game Settings & Layout ----------
 
 with st.sidebar:
     st.header("Game Settings")
@@ -219,7 +234,7 @@ with st.sidebar:
     with col_g2:
         st.session_state.layout_mode = st.radio("Layout", ["Portrait","Landscape"], horizontal=True, index=0)
 
-# ---------- UI: Tabs ----------
+# ---------- Tabs ----------
 
 st.title("🏀 Team Game Stats — Courtside Logger")
 tabs = st.tabs(["Game", "Roster", "Exports/DB"])
@@ -229,31 +244,40 @@ with tabs[0]:
     meta = st.session_state.game_meta
     st.write(f"**Game:** {meta.get('game_id','—')}  |  **Opponent:** {meta.get('opponent','—')}  |  **Date:** {meta.get('date','—')}  |  **Layout:** {st.session_state.layout_mode}")
 
-    # Top controls used by both layouts
+    # Top controls shared
     top_c1, top_c2, top_c3, top_c4 = st.columns([1,1,2,1])
     quarter_sel = top_c1.selectbox("Quarter", st.session_state.quarters, index=0, key="quarter_main")
     clock_sel = top_c2.text_input("Clock (MM:SS)", value="", key="clock_main")
 
-    # Undo button
     if top_c4.button("↩️ Undo Last Event", use_container_width=True):
         undo_last_event()
         if st.session_state.last_undone:
             lu = st.session_state.last_undone
-            st.success(f"Undid: {lu.get('player_display','')} — {lu.get('event','')} ({lu.get('quarter','')} {lu.get('clock','')})")
+            who = lu.get("player_display") or ""
+            evc = lu.get("event") or ""
+            qtr = lu.get("quarter") or ""
+            clk = lu.get("clock") or ""
+            st.success(f"Undid: {who} — {evc} ({qtr} {clk})")
 
-    roster = st.session_state.roster
+    # Clean roster view (skip completely blank rows)
+    roster = st.session_state.roster.copy()
+    def _is_blank_row(r):
+        return not (str(r.get("#") or "").strip() or str(r.get("Player") or "").strip())
+    if not roster.empty:
+        roster = roster[~roster.apply(_is_blank_row, axis=1)].reset_index(drop=True)
 
     if st.session_state.layout_mode == "Portrait":
-        # Original quick list + full event form
         st.subheader("Quick Log — One Tap")
         if roster.empty:
             st.info("Add players on the **Roster** tab to enable quick logging.")
         else:
-            for idx, row in roster.reset_index(drop=True).iterrows():
+            for idx, row in roster.iterrows():
                 display = player_display_from_row(row)
-                name = str(row.get("Player","") or "").strip()
-                num = str(row.get("#","") or "").strip()
+                name = str(row.get("Player") or "").strip()
+                num = str(row.get("#") or "").strip()
 
+                if not display:
+                    continue  # skip fully blank
                 st.markdown(f"**{display}**")
                 c1, c2, c3 = st.columns(3)
                 if c1.button("+2", key=f"qbtn_{idx}_2"):
@@ -269,7 +293,6 @@ with tabs[0]:
                     add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "AST")
                 if c6.button("TOV", key=f"qbtn_{idx}_tov"):
                     add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "TOV")
-                # Add misses & other stats
                 c7, c8, c9 = st.columns(3)
                 if c7.button("2 Miss", key=f"qbtn_{idx}_2miss"):
                     add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "2PT_MISS")
@@ -298,30 +321,47 @@ with tabs[0]:
             st.dataframe(st.session_state.events.sort_values("datetime", ascending=False), use_container_width=True, height=320)
 
     else:
-        # LANDSCAPE: players in rows, stat-action buttons in columns
+        # LANDSCAPE grid with + / count / - stacked vertically in each cell
         st.subheader("Landscape Grid — Tap Actions")
         if roster.empty:
             st.info("Add players on the **Roster** tab to enable the landscape grid.")
         else:
-            # Header row
-            cols = st.columns([2] + [1]*len(LANDSCAPE_BUTTON_COLS))
-            cols[0].markdown("**Player**")
-            for i, (label, _) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
-                cols[i].markdown(f"**{label}**")
+            def header_row():
+                cols = st.columns([2] + [1]*len(LANDSCAPE_BUTTON_COLS))
+                cols[0].markdown("**Player**")
+                for i, (label, _) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
+                    cols[i].markdown(f"**{label}**")
 
-            # Each player row
-            for ridx, row in roster.reset_index(drop=True).iterrows():
+            header_row()
+            for ridx, row in roster.iterrows():
+                # repeat headers every N rows to mimic frozen headings
+                if ridx > 0 and ridx % HEADER_REPEAT_EVERY == 0:
+                    st.markdown("---")
+                    header_row()
+
                 display = player_display_from_row(row)
-                name = str(row.get("Player","") or "").strip()
-                num = str(row.get("#","") or "").strip()
+                if not display:
+                    continue  # skip fully blank
+                name = str(row.get("Player") or "").strip()
+                num = str(row.get("#") or "").strip()
 
                 row_cols = st.columns([2] + [1]*len(LANDSCAPE_BUTTON_COLS))
-                row_cols[0].markdown(display)
+                row_cols[0].markdown(f"**{display}**")
 
                 for cidx, (label, ev_code) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
-                    if row_cols[cidx].button(label, key=f"land_{ridx}_{ev_code}"):
-                        add_event(st.session_state.game_meta.get("game_id",""),
-                                  quarter_sel, clock_sel, display, name, num, ev_code)
+                    with row_cols[cidx]:
+                        bp, bc, bm = st.columns([1,1,1])
+                        # plus
+                        if bp.button("+", key=f"plus_{ridx}_{ev_code}"):
+                            add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, ev_code)
+                        # count (center)
+                        count = get_event_count(display, ev_code)
+                        bc.markdown(f"<div style='text-align:center; font-weight:600;'>{count}</div>", unsafe_allow_html=True)
+                        # minus
+                        if bm.button("–", key=f"minus_{ridx}_{ev_code}"):
+                            removed = remove_last_for(display, ev_code)
+                            if not removed:
+                                st.toast("Nothing to remove for this cell.", icon="⚠️")
 
         st.subheader("Event Log")
         if st.session_state.events.empty:
@@ -340,7 +380,7 @@ with tabs[0]:
 # --------- TAB: Roster ---------
 with tabs[1]:
     st.header("Roster Editor")
-    st.caption("Enter **jersey #**, **player name**, or **both**. Neither is mandatory.")
+    st.caption("Enter **jersey #**, **player name**, or **both**. Leaving both blank will hide the row during logging.")
     if st.session_state.roster.empty:
         st.info("Start typing in the table below. Use ➕ to add rows.")
     edited = st.data_editor(
@@ -355,6 +395,7 @@ with tabs[1]:
     )
     colR1, colR2 = st.columns(2)
     if colR1.button("✅ Save Roster", key="save_roster_tab"):
+        # Keep as strings; blanks remain blanks
         st.session_state.roster = edited.astype(str)
         st.success(f"Roster saved ({len(edited)} players).")
     if colR2.button("🧹 Clear Roster", key="clear_roster_tab"):
