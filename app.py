@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import sqlite3
+import sqlite3, os
 from typing import List, Dict, Any
 
 st.set_page_config(page_title="Team Game Stats", page_icon="🏀", layout="wide")
@@ -33,14 +33,22 @@ LANDSCAPE_BUTTON_COLS = [
     ("PF", "PF"),
     ("FD", "FD"),
 ]
-HEADER_REPEAT_EVERY = 8  # repeat column header row after this many players
+HEADER_REPEAT_EVERY = 10  # repeat header to help when scrolling long rosters
 
-# ---------- State ----------
+ROSTER_CACHE_PATH = "roster_cache.csv"  # persist latest roster locally
+
+# ---------- State / Persistence ----------
 
 def init_state():
     if "roster" not in st.session_state:
-        # jersey # and name are both optional
         st.session_state.roster = pd.DataFrame(columns=["#", "Player"])
+        # Try load cache
+        if os.path.exists(ROSTER_CACHE_PATH):
+            try:
+                cached = pd.read_csv(ROSTER_CACHE_PATH, dtype=str).fillna("")
+                st.session_state.roster = cached[["#", "Player"]]
+            except Exception:
+                pass
     if "events" not in st.session_state:
         st.session_state.events = pd.DataFrame(columns=[
             "game_id","datetime","quarter","clock",
@@ -55,7 +63,7 @@ def init_state():
     if "quarters" not in st.session_state:
         st.session_state.quarters = DEFAULT_QUARTERS.copy()
     if "layout_mode" not in st.session_state:
-        st.session_state.layout_mode = "Portrait"  # Portrait | Landscape
+        st.session_state.layout_mode = "Landscape"  # default to landscape per your sheet use
     if "last_undone" not in st.session_state:
         st.session_state.last_undone = None
 
@@ -203,7 +211,7 @@ def save_to_sqlite(db_path: str, roster: pd.DataFrame, events: pd.DataFrame, gam
         event TEXT,
         notes TEXT
     )""")
-    # Replace players table contents with current roster snapshot
+    # Replace players snapshot
     conn.execute("DELETE FROM players")
     to_store = roster.rename(columns={"#":"number","Player":"name"})[["number","name"]].copy()
     to_store.to_sql("players", conn, if_exists="append", index=False)
@@ -215,6 +223,9 @@ def save_to_sqlite(db_path: str, roster: pd.DataFrame, events: pd.DataFrame, gam
     events_out.to_sql("events", conn, if_exists="append", index=False)
     conn.commit()
     conn.close()
+
+def save_roster_cache(df: pd.DataFrame):
+    df.astype(str).fillna("").to_csv(ROSTER_CACHE_PATH, index=False)
 
 # ---------- Sidebar: Game Settings & Layout ----------
 
@@ -232,7 +243,63 @@ with st.sidebar:
             st.session_state.game_meta = {"opponent": opponent, "date": date_str, "game_id": gid}
             st.success(f"Game set: {gid}")
     with col_g2:
-        st.session_state.layout_mode = st.radio("Layout", ["Portrait","Landscape"], horizontal=True, index=0)
+        st.session_state.layout_mode = st.radio("Layout", ["Portrait","Landscape"], horizontal=True,
+                                                index=(0 if st.session_state.layout_mode=="Portrait" else 1))
+
+# ---------- CSS: sticky headers + borders like Excel ----------
+
+st.markdown("""
+<style>
+/* container for the whole grid to allow sticky header/first column */
+.grid-wrap {
+  overflow: auto;
+  border: 2px solid #cfcfcf;
+  border-radius: 6px;
+}
+
+/* each cell wrapper */
+.cell {
+  border: 1px solid #dddddd;
+  padding: 4px 6px;
+}
+
+/* sticky header (top) */
+.grid-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: white;
+  border-bottom: 2px solid #cfcfcf;
+}
+
+/* sticky first column (player column) */
+.sticky-player {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  background: white;
+  border-right: 2px solid #cfcfcf;
+}
+
+/* center the small counter */
+.counter {
+  text-align: center;
+  font-weight: 600;
+  margin: 2px 0;
+}
+
+/* tighten buttons a bit for grid cells */
+button[kind="secondary"] {
+  padding-top: 0.15rem !important;
+  padding-bottom: 0.15rem !important;
+}
+
+/* reduce padding inside column elements to look more like sheet cells */
+.block-container {
+  padding-top: 1rem;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ---------- Tabs ----------
 
@@ -244,11 +311,9 @@ with tabs[0]:
     meta = st.session_state.game_meta
     st.write(f"**Game:** {meta.get('game_id','—')}  |  **Opponent:** {meta.get('opponent','—')}  |  **Date:** {meta.get('date','—')}  |  **Layout:** {st.session_state.layout_mode}")
 
-    # Top controls shared
     top_c1, top_c2, top_c3, top_c4 = st.columns([1,1,2,1])
     quarter_sel = top_c1.selectbox("Quarter", st.session_state.quarters, index=0, key="quarter_main")
     clock_sel = top_c2.text_input("Clock (MM:SS)", value="", key="clock_main")
-
     if top_c4.button("↩️ Undo Last Event", use_container_width=True):
         undo_last_event()
         if st.session_state.last_undone:
@@ -259,25 +324,22 @@ with tabs[0]:
             clk = lu.get("clock") or ""
             st.success(f"Undid: {who} — {evc} ({qtr} {clk})")
 
-    # Clean roster view (skip completely blank rows)
-    roster = st.session_state.roster.copy()
-    def _is_blank_row(r):
-        return not (str(r.get("#") or "").strip() or str(r.get("Player") or "").strip())
-    if not roster.empty:
-        roster = roster[~roster.apply(_is_blank_row, axis=1)].reset_index(drop=True)
+    # Clean roster (skip rows that are fully blank)
+    roster = st.session_state.roster.copy().astype(str).fillna("")
+    roster = roster[(roster["#"].str.strip()!="") | (roster["Player"].str.strip()!="")].reset_index(drop=True)
 
     if st.session_state.layout_mode == "Portrait":
         st.subheader("Quick Log — One Tap")
         if roster.empty:
-            st.info("Add players on the **Roster** tab to enable quick logging.")
+            st.info("Add players on the **Roster** tab.")
         else:
             for idx, row in roster.iterrows():
                 display = player_display_from_row(row)
+                if not display:
+                    continue
                 name = str(row.get("Player") or "").strip()
                 num = str(row.get("#") or "").strip()
 
-                if not display:
-                    continue  # skip fully blank
                 st.markdown(f"**{display}**")
                 c1, c2, c3 = st.columns(3)
                 if c1.button("+2", key=f"qbtn_{idx}_2"):
@@ -318,59 +380,78 @@ with tabs[0]:
         if st.session_state.events.empty:
             st.write("No events yet.")
         else:
-            st.dataframe(st.session_state.events.sort_values("datetime", ascending=False), use_container_width=True, height=320)
+            st.dataframe(st.session_state.events.sort_values("datetime", ascending=False),
+                         use_container_width=True, height=320)
 
     else:
-        # LANDSCAPE grid with + / count / - stacked vertically in each cell
-        st.subheader("Landscape Grid — Tap Actions")
+        # LANDSCAPE: Excel-like grid with borders, sticky header & first column,
+        # and vertical (+ / count / –) per stat cell
+        st.subheader("Scoring Sheet")
         if roster.empty:
-            st.info("Add players on the **Roster** tab to enable the landscape grid.")
+            st.info("Add players on the **Roster** tab.")
         else:
-            def header_row():
-                cols = st.columns([2] + [1]*len(LANDSCAPE_BUTTON_COLS))
-                cols[0].markdown("**Player**")
-                for i, (label, _) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
-                    cols[i].markdown(f"**{label}**")
+            st.markdown("<div class='grid-wrap'>", unsafe_allow_html=True)
 
-            header_row()
+            # Header row
+            hdr_cols = st.columns([3] + [1]*len(LANDSCAPE_BUTTON_COLS))
+            with hdr_cols[0]:
+                st.markdown("<div class='cell grid-header sticky-player'><b>Player</b></div>", unsafe_allow_html=True)
+            for i, (label, _) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
+                with hdr_cols[i]:
+                    st.markdown(f"<div class='cell grid-header' style='text-align:center'><b>{label}</b></div>",
+                                unsafe_allow_html=True)
+
+            # Player rows
             for ridx, row in roster.iterrows():
-                # repeat headers every N rows to mimic frozen headings
                 if ridx > 0 and ridx % HEADER_REPEAT_EVERY == 0:
-                    st.markdown("---")
-                    header_row()
+                    # repeat header
+                    rpt_cols = st.columns([3] + [1]*len(LANDSCAPE_BUTTON_COLS))
+                    with rpt_cols[0]:
+                        st.markdown("<div class='cell grid-header sticky-player'><b>Player</b></div>", unsafe_allow_html=True)
+                    for i, (label, _) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
+                        with rpt_cols[i]:
+                            st.markdown(f"<div class='cell grid-header' style='text-align:center'><b>{label}</b></div>",
+                                        unsafe_allow_html=True)
 
                 display = player_display_from_row(row)
-                if not display:
-                    continue  # skip fully blank
                 name = str(row.get("Player") or "").strip()
                 num = str(row.get("#") or "").strip()
 
-                row_cols = st.columns([2] + [1]*len(LANDSCAPE_BUTTON_COLS))
-                row_cols[0].markdown(f"**{display}**")
+                # skip fully blank
+                if not display:
+                    continue
+
+                row_cols = st.columns([3] + [1]*len(LANDSCAPE_BUTTON_COLS))
+                with row_cols[0]:
+                    st.markdown(f"<div class='cell sticky-player'><b>{display}</b></div>", unsafe_allow_html=True)
 
                 for cidx, (label, ev_code) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
                     with row_cols[cidx]:
-                        bp, bc, bm = st.columns([1,1,1])
-                        # plus
-                        if bp.button("+", key=f"plus_{ridx}_{ev_code}"):
-                            add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, ev_code)
-                        # count (center)
-                        count = get_event_count(display, ev_code)
-                        bc.markdown(f"<div style='text-align:center; font-weight:600;'>{count}</div>", unsafe_allow_html=True)
-                        # minus
-                        if bm.button("–", key=f"minus_{ridx}_{ev_code}"):
+                        # cell border box
+                        st.markdown("<div class='cell'>", unsafe_allow_html=True)
+                        btop, bmid, bbot = st.columns([1,1,1])
+                        if btop.button("+", key=f"plus_{ridx}_{ev_code}", use_container_width=True):
+                            add_event(st.session_state.game_meta.get("game_id",""),
+                                      quarter_sel, clock_sel, display, name, num, ev_code)
+                        cnt = get_event_count(display, ev_code)
+                        bmid.markdown(f"<div class='counter'>{cnt}</div>", unsafe_allow_html=True)
+                        if bbot.button("–", key=f"minus_{ridx}_{ev_code}", use_container_width=True):
                             removed = remove_last_for(display, ev_code)
                             if not removed:
-                                st.toast("Nothing to remove for this cell.", icon="⚠️")
+                                st.toast("Nothing to remove for this stat.", icon="⚠️")
+                        st.markdown("</div>", unsafe_allow_html=True)  # end cell
+
+            st.markdown("</div>", unsafe_allow_html=True)  # end grid-wrap
 
         st.subheader("Event Log")
         if st.session_state.events.empty:
             st.write("No events yet.")
         else:
-            st.dataframe(st.session_state.events.sort_values("datetime", ascending=False), use_container_width=True, height=320)
+            st.dataframe(st.session_state.events.sort_values("datetime", ascending=False),
+                         use_container_width=True, height=320)
 
-    # Box Score (common to both)
-    st.subheader("Box Score (auto: makes & attempts)")
+    # Box Score
+    st.subheader("Box Score (makes & attempts)")
     box = compute_box(st.session_state.events)
     if box.empty:
         st.write("No stats yet.")
@@ -388,19 +469,26 @@ with tabs[1]:
         num_rows="dynamic",
         use_container_width=True,
         column_config={
-            "#": st.column_config.TextColumn("Jersey #", help="Optional: e.g., 3, 12, 25"),
-            "Player": st.column_config.TextColumn("Player", help="Optional: name")
+            "#": st.column_config.TextColumn("Jersey #", help="Optional"),
+            "Player": st.column_config.TextColumn("Player", help="Optional")
         },
         key="roster_editor_tab"
     )
-    colR1, colR2 = st.columns(2)
+    colR1, colR2, colR3 = st.columns(3)
     if colR1.button("✅ Save Roster", key="save_roster_tab"):
         # Keep as strings; blanks remain blanks
-        st.session_state.roster = edited.astype(str)
+        st.session_state.roster = edited.astype(str).fillna("")
+        save_roster_cache(st.session_state.roster)  # persist to disk so it remains between runs
         st.success(f"Roster saved ({len(edited)} players).")
     if colR2.button("🧹 Clear Roster", key="clear_roster_tab"):
         st.session_state.roster = pd.DataFrame(columns=["#","Player"])
+        save_roster_cache(st.session_state.roster)
         st.rerun()
+    if colR3.download_button("⬇️ Download Roster CSV",
+                             st.session_state.roster.to_csv(index=False).encode("utf-8"),
+                             file_name="roster.csv",
+                             mime="text/csv"):
+        pass
 
 # --------- TAB: Exports / DB ---------
 with tabs[2]:
