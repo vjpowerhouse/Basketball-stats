@@ -3,12 +3,11 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import sqlite3, os, math
-from typing import List, Dict, Any
+from typing import Any
 
 st.set_page_config(page_title="Team Game Stats", page_icon="🏀", layout="wide")
 
 # ---------- Config / Constants ----------
-
 EVENT_TYPES = [
     "2PT_MADE","2PT_MISS","3PT_MADE","3PT_MISS","FT_MADE","FT_MISS",
     "OREB","DREB","AST","STL","BLK","TOV","PF","FD"
@@ -16,27 +15,27 @@ EVENT_TYPES = [
 
 DEFAULT_QUARTERS = ["Q1","Q2","Q3","Q4","OT"]
 
+# Landscape stat columns (label, event code, short label shown inside each cell)
 LANDSCAPE_BUTTON_COLS = [
-    ("+2", "2PT_MADE"),
-    ("2 Miss", "2PT_MISS"),
-    ("+3", "3PT_MADE"),
-    ("3 Miss", "3PT_MISS"),
-    ("FT", "FT_MADE"),
-    ("FT Miss", "FT_MISS"),
-    ("OREB", "OREB"),
-    ("DREB", "DREB"),
-    ("AST", "AST"),
-    ("STL", "STL"),
-    ("BLK", "BLK"),
-    ("TOV", "TOV"),
-    ("PF", "PF"),
-    ("FD", "FD"),
+    ("+2", "2PT_MADE", "2PT"),
+    ("2 Miss", "2PT_MISS", "2X"),
+    ("+3", "3PT_MADE", "3PT"),
+    ("3 Miss", "3PT_MISS", "3X"),
+    ("FT", "FT_MADE", "FT"),
+    ("FT Miss", "FT_MISS", "FTX"),
+    ("OREB", "OREB", "OR"),
+    ("DREB", "DREB", "DR"),
+    ("AST", "AST", "A"),
+    ("STL", "STL", "S"),
+    ("BLK", "BLK", "B"),
+    ("TOV", "TOV", "TO"),
+    ("PF", "PF", "PF"),
+    ("FD", "FD", "FD"),
 ]
 HEADER_REPEAT_EVERY = 10
 ROSTER_CACHE_PATH = "roster_cache.csv"
 
 # ---------- State / Persistence ----------
-
 def init_state():
     if "roster" not in st.session_state:
         st.session_state.roster = pd.DataFrame(columns=["#", "Player"])
@@ -63,13 +62,10 @@ def init_state():
         st.session_state.layout_mode = "Landscape"
     if "last_undone" not in st.session_state:
         st.session_state.last_undone = None
-
 init_state()
 
 # ---------- Helpers ----------
-
 def clean(x: Any) -> str:
-    """Normalize None/NaN/'None'/'nan' to '', and trim."""
     if x is None:
         return ""
     if isinstance(x, float) and math.isnan(x):
@@ -93,8 +89,7 @@ def player_display_from_row(row: pd.Series) -> str:
         return name
     elif num:
         return f"#{num}"
-    else:
-        return ""   # completely blank if both empty
+    return ""
 
 def pretty_name(rec: pd.Series) -> str:
     num = clean(rec.get("#"))
@@ -105,8 +100,7 @@ def pretty_name(rec: pd.Series) -> str:
         return name
     elif num:
         return f"#{num}"
-    else:
-        return ""   # blank
+    return ""
 
 def add_event(game_id: str, quarter: str, clock: str,
               player_display: str, player_name: str, number: str,
@@ -158,7 +152,6 @@ def compute_box(events: pd.DataFrame) -> pd.DataFrame:
             "Player","MIN","PTS","FGM","FGA","FG%","3PM","3PA","3P%","FTM","FTA","FT%",
             "OREB","DREB","REB","AST","STL","BLK","TOV","PF"
         ])
-
     ev = events.copy()
     grp = ev.groupby(["#", "player_name", "player_display"], dropna=False)
 
@@ -180,7 +173,6 @@ def compute_box(events: pd.DataFrame) -> pd.DataFrame:
     pf    = grp.apply(lambda g: (g["event"]=="PF").sum()).rename("PF")
 
     box = pd.concat([two_m, two_a, thr_m, thr_a, ft_m, ft_a, oreb, dreb, ast, stl, blk, tov, pf], axis=1).reset_index()
-
     box["FGM"] = box["2PM"] + box["3PM"]
     box["FGA"] = box["2PA"] + box["3PA"]
     box["PTS"] = box["2PM"]*2 + box["3PM"]*3 + box["FTM"]
@@ -196,28 +188,14 @@ def compute_box(events: pd.DataFrame) -> pd.DataFrame:
     box = box[cols].sort_values(["PTS","REB","AST"], ascending=[False, False, False]).reset_index(drop=True)
     return box
 
-def save_to_sqlite(db_path: str, roster: pd.DataFrame, events: pd.DataFrame, game_meta: Dict[str,Any]):
+def save_to_sqlite(db_path: str, roster: pd.DataFrame, events: pd.DataFrame, game_meta: dict):
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS players (
-        number TEXT,
-        name TEXT
-    )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS games (
-        game_id TEXT PRIMARY KEY,
-        opponent TEXT,
-        date TEXT
-    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS players (number TEXT, name TEXT)""")
+    c.execute("""CREATE TABLE IF NOT EXISTS games (game_id TEXT PRIMARY KEY, opponent TEXT, date TEXT)""")
     c.execute("""CREATE TABLE IF NOT EXISTS events (
-        game_id TEXT,
-        datetime TEXT,
-        quarter TEXT,
-        clock TEXT,
-        player_display TEXT,
-        player_name TEXT,
-        number TEXT,
-        event TEXT,
-        notes TEXT
+        game_id TEXT, datetime TEXT, quarter TEXT, clock TEXT,
+        player_display TEXT, player_name TEXT, number TEXT, event TEXT, notes TEXT
     )""")
     conn.execute("DELETE FROM players")
     to_store = roster.rename(columns={"#":"number","Player":"name"})[["number","name"]].copy()
@@ -226,20 +204,17 @@ def save_to_sqlite(db_path: str, roster: pd.DataFrame, events: pd.DataFrame, gam
                  (game_meta["game_id"], game_meta["opponent"], game_meta["date"]))
     events_out = events.drop(columns=["#"], errors="ignore").copy()
     events_out.to_sql("events", conn, if_exists="append", index=False)
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
 def save_roster_cache(df: pd.DataFrame):
     df.astype(str).fillna("").to_csv(ROSTER_CACHE_PATH, index=False)
 
 # ---------- Sidebar ----------
-
 with st.sidebar:
     st.header("Game Settings")
     opponent = st.text_input("Opponent", value=clean(st.session_state.game_meta.get("opponent","")))
     date_str = st.date_input("Date", value=pd.to_datetime(st.session_state.game_meta.get("date", datetime.today().date()))).isoformat()
     q_custom = st.text_input("Quarters (comma separated)", value=",".join(st.session_state.quarters))
-
     col_g1, col_g2 = st.columns(2)
     with col_g1:
         if st.button("Apply"):
@@ -248,58 +223,28 @@ with st.sidebar:
             st.session_state.game_meta = {"opponent": opponent, "date": date_str, "game_id": gid}
             st.success(f"Game set: {gid}")
     with col_g2:
-        st.session_state.layout_mode = st.radio("Layout", ["Portrait","Landscape"], horizontal=True,
-                                                index=(0 if st.session_state.layout_mode=="Portrait" else 1))
+        st.session_state.layout_mode = st.radio(
+            "Layout", ["Portrait","Landscape"], horizontal=True,
+            index=(0 if st.session_state.layout_mode=="Portrait" else 1)
+        )
 
-# ---------- CSS (fixed spacing, sticky headers, borders) ----------
-
+# ---------- CSS (mobile-friendly, sticky, clear labels) ----------
 st.markdown("""
 <style>
-.grid-wrap {
-  overflow: auto;
-  border: 2px solid #cfcfcf;
-  border-radius: 8px;
-}
-.cell {
-  border: 1px solid #dddddd;
-  padding: 6px 8px;
-  background: #fff;
-}
-.grid-header {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  background: #fff;
-  border-bottom: 2px solid #cfcfcf;
-}
-.sticky-player {
-  position: sticky;
-  left: 0;
-  z-index: 4;
-  background: #fff;
-  border-right: 2px solid #cfcfcf;
-}
-.cell-vert {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;               /* <-- adds space between +, count, – */
-  min-height: 90px;       /* <-- ensures room so items don't overlap */
-  justify-content: center;
-}
-.counter {
-  text-align: center;
-  font-weight: 700;
-  padding: 2px 6px;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
-  min-width: 28px;
-}
+.grid-wrap { overflow: auto; border: 2px solid #cfcfcf; border-radius: 8px; }
+.cell { border: 1px solid #dddddd; padding: 8px; background: #fff; }
+.grid-header { position: sticky; top: 0; z-index: 5; background: #fff; border-bottom: 2px solid #cfcfcf; }
+.sticky-player { position: sticky; left: 0; z-index: 4; background: #fff; border-right: 2px solid #cfcfcf; }
+.cell-vert { display: flex; flex-direction: column; align-items: center; gap: 10px;
+             min-height: 120px; justify-content: center; }
+.counter { text-align: center; font-weight: 800; padding: 4px 10px; border: 1px solid #d0d0d0;
+           border-radius: 8px; min-width: 34px; }
+.col-label { font-size: 11px; line-height: 1; text-align: center; color: #666; margin-bottom: 6px; }
+.plusminus .stButton>button { font-size: 20px; font-weight: 900; }  /* bigger emoji buttons */
 </style>
 """, unsafe_allow_html=True)
 
 # ---------- Tabs ----------
-
 st.title("🏀 Team Game Stats — Courtside Logger")
 tabs = st.tabs(["Game", "Roster", "Exports/DB"])
 
@@ -315,11 +260,7 @@ with tabs[0]:
         undo_last_event()
         if st.session_state.last_undone:
             lu = st.session_state.last_undone
-            who = clean(lu.get("player_display"))
-            evc = clean(lu.get("event"))
-            qtr = clean(lu.get("quarter"))
-            clk = clean(lu.get("clock"))
-            st.success(f"Undid: {who} — {evc} ({qtr} {clk})")
+            st.success(f"Undid: {clean(lu.get('player_display'))} — {clean(lu.get('event'))} ({clean(lu.get('quarter'))} {clean(lu.get('clock'))})")
 
     # Clean roster (remove fully blank)
     roster = st.session_state.roster.copy()
@@ -336,43 +277,29 @@ with tabs[0]:
                 display = player_display_from_row(row)
                 if not display:
                     continue
-                name = clean(row.get("Player"))
-                num = clean(row.get("#"))
-
+                name = clean(row.get("Player")); num = clean(row.get("#"))
                 st.markdown(f"**{display}**")
                 c1, c2, c3 = st.columns(3)
-                if c1.button("+2", key=f"qbtn_{idx}_2"):
+                if c1.button("➕ 2", key=f"qbtn_{idx}_2"):
                     add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "2PT_MADE")
-                if c2.button("+3", key=f"qbtn_{idx}_3"):
+                if c2.button("➕ 3", key=f"qbtn_{idx}_3"):
                     add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "3PT_MADE")
-                if c3.button("FT", key=f"qbtn_{idx}_ft"):
+                if c3.button("➕ FT", key=f"qbtn_{idx}_ft"):
                     add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "FT_MADE")
                 c4, c5, c6 = st.columns(3)
-                if c4.button("OREB", key=f"qbtn_{idx}_oreb"):
+                if c4.button("➕ OREB", key=f"qbtn_{idx}_oreb"):
                     add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "OREB")
-                if c5.button("AST", key=f"qbtn_{idx}_ast"):
+                if c5.button("➕ AST", key=f"qbtn_{idx}_ast"):
                     add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "AST")
-                if c6.button("TOV", key=f"qbtn_{idx}_tov"):
+                if c6.button("➕ TOV", key=f"qbtn_{idx}_tov"):
                     add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "TOV")
                 c7, c8, c9 = st.columns(3)
-                if c7.button("2 Miss", key=f"qbtn_{idx}_2miss"):
+                if c7.button("➖ 2 Miss", key=f"qbtn_{idx}_2miss"):
                     add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "2PT_MISS")
-                if c8.button("3 Miss", key=f"qbtn_{idx}_3miss"):
+                if c8.button("➖ 3 Miss", key=f"qbtn_{idx}_3miss"):
                     add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "3PT_MISS")
-                if c9.button("FT Miss", key=f"qbtn_{idx}_ftmiss"):
+                if c9.button("➖ FT Miss", key=f"qbtn_{idx}_ftmiss"):
                     add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "FT_MISS")
-                c10, c11, c12 = st.columns(3)
-                if c10.button("DREB", key=f"qbtn_{idx}_dreb"):
-                    add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "DREB")
-                if c11.button("STL", key=f"qbtn_{idx}_stl"):
-                    add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "STL")
-                if c12.button("BLK", key=f"qbtn_{idx}_blk"):
-                    add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "BLK")
-                c13, c14 = st.columns(2)
-                if c13.button("PF", key=f"qbtn_{idx}_pf"):
-                    add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "PF")
-                if c14.button("FD", key=f"qbtn_{idx}_fd"):
-                    add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, "FD")
                 st.divider()
 
         st.subheader("Event Log")
@@ -383,64 +310,61 @@ with tabs[0]:
                          use_container_width=True, height=320)
 
     else:
-        # LANDSCAPE scoring sheet
+        # LANDSCAPE scoring sheet with per-cell labels and big emoji buttons
         st.subheader("Scoring Sheet")
         if roster.empty:
             st.info("Add players on the **Roster** tab.")
         else:
             st.markdown("<div class='grid-wrap'>", unsafe_allow_html=True)
 
-            # Header row (sticky)
+            # Sticky header row
             hdr_cols = st.columns([3] + [1]*len(LANDSCAPE_BUTTON_COLS))
             with hdr_cols[0]:
                 st.markdown("<div class='cell grid-header sticky-player'><b>Player</b></div>", unsafe_allow_html=True)
-            for i, (label, _) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
+            for i, (label, _, _) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
                 with hdr_cols[i]:
                     st.markdown(f"<div class='cell grid-header' style='text-align:center'><b>{label}</b></div>",
                                 unsafe_allow_html=True)
 
-            # Player rows
             for ridx, row in roster.iterrows():
                 if ridx > 0 and ridx % HEADER_REPEAT_EVERY == 0:
-                    rpt_cols = st.columns([3] + [1]*len(LANDSCAPE_BUTTON_COLS))
-                    with rpt_cols[0]:
+                    rpt = st.columns([3] + [1]*len(LANDSCAPE_BUTTON_COLS))
+                    with rpt[0]:
                         st.markdown("<div class='cell grid-header sticky-player'><b>Player</b></div>", unsafe_allow_html=True)
-                    for i, (label, _) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
-                        with rpt_cols[i]:
-                            st.markdown(f"<div class='cell grid-header' style='text-align:center'><b>{label}</b></div>",
-                                        unsafe_allow_html=True)
+                    for i, (label, _, _) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
+                        with rpt[i]:
+                            st.markdown(f"<div class='cell grid-header' style='text-align:center'><b>{label}</b></div>", unsafe_allow_html=True)
 
                 display = player_display_from_row(row)
                 if not display:
                     continue
-                name = clean(row.get("Player"))
-                num = clean(row.get("#"))
+                name = clean(row.get("Player")); num = clean(row.get("#"))
 
                 row_cols = st.columns([3] + [1]*len(LANDSCAPE_BUTTON_COLS))
                 with row_cols[0]:
                     st.markdown(f"<div class='cell sticky-player'><b>{display}</b></div>", unsafe_allow_html=True)
 
-                for cidx, (label, ev_code) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
+                for cidx, (label, ev_code, short_lbl) in enumerate(LANDSCAPE_BUTTON_COLS, start=1):
                     with row_cols[cidx]:
                         st.markdown("<div class='cell'>", unsafe_allow_html=True)
-                        st.markdown("<div class='cell-vert'>", unsafe_allow_html=True)
-
-                        c_plus = st.button("+", key=f"plus_{ridx}_{ev_code}", use_container_width=True)
+                        # small column label inside each cell
+                        st.markdown(f"<div class='col-label'>{short_lbl}</div>", unsafe_allow_html=True)
+                        # stack: plus / count / minus
+                        st.markdown("<div class='cell-vert plusminus'>", unsafe_allow_html=True)
+                        b_plus = st.button("➕", key=f"plus_{ridx}_{ev_code}", use_container_width=True)
                         cnt = get_event_count(display, ev_code)
                         st.markdown(f"<div class='counter'>{cnt}</div>", unsafe_allow_html=True)
-                        c_minus = st.button("–", key=f"minus_{ridx}_{ev_code}", use_container_width=True)
-
-                        if c_plus:
-                            add_event(meta.get("game_id",""), quarter_sel, clock_sel, display, name, num, ev_code)
-                        if c_minus:
-                            removed = remove_last_for(display, ev_code)
-                            if not removed:
+                        b_minus = st.button("➖", key=f"minus_{ridx}_{ev_code}", use_container_width=True)
+                        if b_plus:
+                            add_event(st.session_state.game_meta.get("game_id",""),
+                                      quarter_sel, clock_sel, display, name, num, ev_code)
+                        if b_minus:
+                            if not remove_last_for(display, ev_code):
                                 st.toast("Nothing to remove for this stat.", icon="⚠️")
-
-                        st.markdown("</div>", unsafe_allow_html=True)  # end cell-vert
+                        st.markdown("</div>", unsafe_allow_html=True)  # end stack
                         st.markdown("</div>", unsafe_allow_html=True)  # end cell
 
-            st.markdown("</div>", unsafe_allow_html=True)  # end grid-wrap
+            st.markdown("</div>", unsafe_allow_html=True)  # grid-wrap
 
         st.subheader("Event Log")
         if st.session_state.events.empty:
@@ -478,7 +402,7 @@ with tabs[1]:
         st.session_state.roster = edited.copy()
         st.session_state.roster["#"] = st.session_state.roster["#"].map(clean)
         st.session_state.roster["Player"] = st.session_state.roster["Player"].map(clean)
-        save_roster_cache(st.session_state.roster)  # persist last roster
+        save_roster_cache(st.session_state.roster)
         st.success(f"Roster saved ({len(st.session_state.roster)} players).")
     if colR2.button("🧹 Clear Roster", key="clear_roster_tab"):
         st.session_state.roster = pd.DataFrame(columns=["#","Player"])
