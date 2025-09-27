@@ -55,6 +55,8 @@ def init_state():
         st.session_state.quarters = DEFAULT_QUARTERS.copy()
     if "layout_mode" not in st.session_state:
         st.session_state.layout_mode = "Portrait"  # Portrait | Landscape
+    if "last_undone" not in st.session_state:
+        st.session_state.last_undone = None  # store the last removed event for feedback
 
 init_state()
 
@@ -87,11 +89,22 @@ def add_event(game_id: str, quarter: str, clock: str,
         "clock": clock,
         "player_display": player_display,
         "player_name": player_name,
+        "number": number,  # store under 'number' too for DB clarity
         "#": number,
         "event": event,
         "notes": notes
     }
     st.session_state.events = pd.concat([st.session_state.events, pd.DataFrame([row])], ignore_index=True)
+
+def undo_last_event():
+    if st.session_state.events.empty:
+        st.info("No events to undo.")
+        st.session_state.last_undone = None
+        return
+    # The last row in the DataFrame is the most recently appended event
+    last_row = st.session_state.events.iloc[[-1]].to_dict(orient="records")[0]
+    st.session_state.events = st.session_state.events.iloc[:-1].reset_index(drop=True)
+    st.session_state.last_undone = last_row
 
 def compute_box(events: pd.DataFrame) -> pd.DataFrame:
     if events.empty:
@@ -178,7 +191,6 @@ def save_to_sqlite(db_path: str, roster: pd.DataFrame, events: pd.DataFrame, gam
     )""")
     # Upsert roster (simple replace)
     conn.execute("DELETE FROM players")
-    # Normalize roster to (number, name) even if either is blank
     to_store = roster.rename(columns={"#":"number","Player":"name"})[["number","name"]].copy()
     to_store.to_sql("players", conn, if_exists="append", index=False)
     # Upsert game
@@ -218,9 +230,16 @@ with tabs[0]:
     st.write(f"**Game:** {meta.get('game_id','—')}  |  **Opponent:** {meta.get('opponent','—')}  |  **Date:** {meta.get('date','—')}  |  **Layout:** {st.session_state.layout_mode}")
 
     # Top controls used by both layouts
-    top_c1, top_c2, top_c3 = st.columns([1,1,2])
+    top_c1, top_c2, top_c3, top_c4 = st.columns([1,1,2,1])
     quarter_sel = top_c1.selectbox("Quarter", st.session_state.quarters, index=0, key="quarter_main")
     clock_sel = top_c2.text_input("Clock (MM:SS)", value="", key="clock_main")
+
+    # Undo button
+    if top_c4.button("↩️ Undo Last Event", use_container_width=True):
+        undo_last_event()
+        if st.session_state.last_undone:
+            lu = st.session_state.last_undone
+            st.success(f"Undid: {lu.get('player_display','')} — {lu.get('event','')} ({lu.get('quarter','')} {lu.get('clock','')})")
 
     roster = st.session_state.roster
 
